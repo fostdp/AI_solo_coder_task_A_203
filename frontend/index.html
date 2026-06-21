@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>古代筒车轴承水润滑流场仿真与摩擦功耗分析系统</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.0/dist/chart.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="header-left">
+                <h1>🏺 古代筒车轴承水润滑流场仿真系统</h1>
+                <p class="subtitle">宋代筒车水润滑轴承 · Navier-Stokes方程 · 空化模型</p>
+            </div>
+            <div class="header-right">
+                <div class="bearing-selector">
+                    <label>选择轴承：</label>
+                    <select id="bearingSelect">
+                        <option value="bearing_001">轴承 #001</option>
+                        <option value="bearing_002">轴承 #002</option>
+                        <option value="bearing_003">轴承 #003</option>
+                    </select>
+                </div>
+                <div class="connection-status" id="connectionStatus">
+                    <span class="status-dot" id="statusDot"></span>
+                    <span id="statusText">连接中...</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="alert-banner" id="alertBanner" style="display: none;">
+            <div class="alert-icon">⚠️</div>
+            <div class="alert-content">
+                <span id="alertMessage">告警信息</span>
+            </div>
+            <button class="alert-close" onclick="document.getElementById('alertBanner').style.display='none'">✕</button>
+        </div>
+
+        <div class="main-content">
+            <div class="panel panel-large">
+                <div class="panel-header">
+                    <h2>🔧 轴承三维模型</h2>
+                    <div class="panel-controls">
+                        <label class="control-item">
+                            <input type="checkbox" id="showParticles" checked>
+                            <span>水膜粒子</span>
+                        </label>
+                        <label class="control-item">
+                            <input type="checkbox" id="showWireframe">
+                            <span>线框模式</span>
+                        </label>
+                        <label class="control-item">
+                            <span>旋转速度</span>
+                            <input type="range" id="rotSpeed" min="0" max="100" value="30">
+                        </label>
+                    </div>
+                </div>
+                <div class="panel-body">
+                    <div id="bearing3d" class="canvas-container"></div>
+                    <div class="bearing-info-overlay">
+                        <div class="info-item">
+                            <span class="info-label">偏心率</span>
+                            <span class="info-value" id="eccentricityDisplay">0.30</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">水膜厚度</span>
+                            <span class="info-value" id="filmThicknessDisplay">140 μm</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header">
+                    <h2>💧 水膜流场仿真</h2>
+                    <div class="badge badge-normal" id="filmStatusBadge">正常</div>
+                </div>
+                <div class="panel-body">
+                    <div class="simulation-controls">
+                        <div class="control-group">
+                            <label>转速 (RPM)</label>
+                            <input type="range" id="simRpm" min="5" max="80" value="35" class="slider">
+                            <span id="simRpmValue">35</span>
+                        </div>
+                        <div class="control-group">
+                            <label>偏心率</label>
+                            <input type="range" id="simEccentricity" min="0.05" max="0.9" step="0.01" value="0.3" class="slider">
+                            <span id="simEccentricityValue">0.30</span>
+                        </div>
+                        <div class="control-group">
+                            <label>水温 (°C)</label>
+                            <input type="range" id="simTemp" min="5" max="40" value="22" class="slider">
+                            <span id="simTempValue">22</span>
+                        </div>
+                        <button class="btn btn-primary" id="runSimulation">运行仿真</button>
+                    </div>
+                    <div class="simulation-results">
+                        <div class="result-grid">
+                            <div class="result-item">
+                                <span class="result-label">最大压力</span>
+                                <span class="result-value" id="resultMaxPressure">-- kPa</span>
+                            </div>
+                            <div class="result-item">
+                                <span class="result-label">承载能力</span>
+                                <span class="result-value" id="resultLoadCapacity">-- N</span>
+                            </div>
+                            <div class="result-item">
+                                <span class="result-label">空化面积</span>
+                                <span class="result-value" id="resultCavitation">-- %</span>
+                            </div>
+                            <div class="result-item">
+                                <span class="result-label">破裂风险</span>
+                                <span class="result-value" id="resultRupture">--</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="panel">
+                <div class="panel-header">
+                    <h2>📈 摩擦功耗趋势</h2>
+                    <div class="time-range-selector">
+                        <button class="time-btn active" data-range="-1h">1小时</button>
+                        <button class="time-btn" data-range="-6h">6小时</button>
+                        <button class="time-btn" data-range="-24h">24小时</button>
+                    </div>
+                </div>
+                <div class="panel-body">
+                    <canvas id="powerChart" class="chart-canvas"></canvas>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header">
+                    <h2>🌡️ 压力分布曲线</h2>
+                </div>
+                <div class="panel-body">
+                    <canvas id="pressureChart" class="chart-canvas"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="panel">
+                <div class="panel-header">
+                    <h2>📊 实时数据</h2>
+                </div>
+                <div class="panel-body">
+                    <div class="data-grid">
+                        <div class="data-card">
+                            <div class="data-icon">⚙️</div>
+                            <div class="data-info">
+                                <span class="data-label">转速</span>
+                                <span class="data-value" id="liveRpm">--</span>
+                                <span class="data-unit">RPM</span>
+                            </div>
+                        </div>
+                        <div class="data-card">
+                            <div class="data-icon">💧</div>
+                            <div class="data-info">
+                                <span class="data-label">水膜压力</span>
+                                <span class="data-value" id="livePressure">--</span>
+                                <span class="data-unit">kPa</span>
+                            </div>
+                        </div>
+                        <div class="data-card">
+                            <div class="data-icon">🔬</div>
+                            <div class="data-info">
+                                <span class="data-label">摩擦系数</span>
+                                <span class="data-value" id="liveFriction">--</span>
+                                <span class="data-unit">μ</span>
+                            </div>
+                        </div>
+                        <div class="data-card">
+                            <div class="data-icon">🌡️</div>
+                            <div class="data-info">
+                                <span class="data-label">水温</span>
+                                <span class="data-value" id="liveTemp">--</span>
+                                <span class="data-unit">°C</span>
+                            </div>
+                        </div>
+                        <div class="data-card">
+                            <div class="data-icon">⚡</div>
+                            <div class="data-info">
+                                <span class="data-label">摩擦功耗</span>
+                                <span class="data-value" id="livePower">--</span>
+                                <span class="data-unit">W</span>
+                            </div>
+                        </div>
+                        <div class="data-card">
+                            <div class="data-icon">📏</div>
+                            <div class="data-info">
+                                <span class="data-label">最小水膜</span>
+                                <span class="data-value" id="liveFilm">--</span>
+                                <span class="data-unit">μm</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header">
+                    <h2>🔔 告警记录</h2>
+                    <span class="alert-count-badge" id="alertCount">0</span>
+                </div>
+                <div class="panel-body">
+                    <div class="alert-list" id="alertList">
+                        <div class="empty-state">暂无告警记录</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="panel panel-full">
+                <div class="panel-header">
+                    <h2>🌊 水膜流场粒子可视化</h2>
+                    <div class="panel-controls">
+                        <label class="control-item">
+                            <span>粒子数量</span>
+                            <input type="range" id="particleCount" min="100" max="2000" value="500">
+                        </label>
+                        <label class="control-item">
+                            <span>粒子速度</span>
+                            <input type="range" id="particleSpeed" min="1" max="100" value="50">
+                        </label>
+                    </div>
+                </div>
+                <div class="panel-body">
+                    <canvas id="particleCanvas" class="particle-canvas"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <footer class="footer">
+            <p>古代筒车轴承水润滑流场仿真与摩擦功耗分析系统 · 水利史研究团队</p>
+        </footer>
+    </div>
+
+    <script src="js/chart.js"></script>
+    <script src="js/particles.js"></script>
+    <script src="js/bearing3d.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>
