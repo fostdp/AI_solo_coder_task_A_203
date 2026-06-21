@@ -352,8 +352,8 @@ async def run_simulation(req: SimulationRequest):
     pressure = pressure_result['pressure']
     film_thickness = pressure_result['film_thickness']
 
-    cav_result = cavitation.detect_cavitation(pressure, film_thickness)
-    rupture_result = cavitation.assess_film_rupture(pressure, film_thickness)
+    cav_result = cavitation.detect_cavitation(pressure, film_thickness, omega)
+    rupture_result = cavitation.assess_film_rupture(pressure, film_thickness, omega)
 
     actual_load = min(req.load, pressure_result['load_capacity'] * 0.8)
     friction_result = friction.full_analysis(

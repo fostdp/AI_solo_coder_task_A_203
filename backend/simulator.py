@@ -76,8 +76,8 @@ class BearingSimulator:
         pressure = pressure_result['pressure']
         film_thickness = pressure_result['film_thickness']
 
-        cav_result = self.cavitation.detect_cavitation(pressure, film_thickness)
-        rupture_result = self.cavitation.assess_film_rupture(pressure, film_thickness)
+        cav_result = self.cavitation.detect_cavitation(pressure, film_thickness, omega)
+        rupture_result = self.cavitation.assess_film_rupture(pressure, film_thickness, omega)
 
         load_capacity = pressure_result['load_capacity']
         actual_load = min(self.load, load_capacity * 0.8)
