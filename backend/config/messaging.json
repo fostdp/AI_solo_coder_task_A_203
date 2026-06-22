@@ -1,0 +1,29 @@
+{
+  "_comment": "消息总线通道定义 - 所有模块间通信统一通过此配置",
+  "channels": {
+    "raw_data": "bearing:raw_data",
+    "flow_result": "bearing:flow_result",
+    "friction_result": "bearing:friction_result",
+    "alerts": "bearing:alerts",
+    "live_update": "bearing:live_update",
+    "simulation_request": "bearing:sim_request",
+    "simulation_response": "bearing:sim_response"
+  },
+  "redis": {
+    "host": "localhost",
+    "port": 6379,
+    "db": 0,
+    "max_connections": 50,
+    "socket_timeout": 5,
+    "socket_connect_timeout": 3,
+    "retry_on_timeout": true,
+    "decode_responses": true,
+    "use_fake_if_unavailable": true
+  },
+  "cache_ttl_seconds": {
+    "bearing_latest": 3600,
+    "flow_result": 1800,
+    "friction_result": 1800,
+    "alerts": 86400
+  }
+}

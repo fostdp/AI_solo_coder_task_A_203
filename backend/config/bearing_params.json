@@ -1,0 +1,70 @@
+{
+  "_comment": "宋代筒车水润滑轴承 - 轴承几何与运行参数配置",
+  "bearing": {
+    "song_dynasty_water_wheel": {
+      "radius_mm": 50,
+      "radius_m": 0.05,
+      "length_mm": 200,
+      "length_m": 0.2,
+      "clearance_micron": 100,
+      "clearance_m": 0.0001,
+      "diameter_to_length_ratio": 0.5,
+      "eccentricity_ratio_default": 0.3,
+      "material": {
+        "inner_ring": "cast_iron_song",
+        "outer_ring": "carpentry_wood",
+        "elastic_modulus_inner_pa": 1.0e11,
+        "elastic_modulus_outer_pa": 1.0e10,
+        "poisson_ratio_inner": 0.29,
+        "poisson_ratio_outer": 0.35,
+        "surface_roughness_inner_micron": 3.2,
+        "surface_roughness_outer_micron": 6.3
+      }
+    }
+  },
+  "solver": {
+    "reynolds_equation": {
+      "grid_size": 32,
+      "sor_relaxation": 0.05,
+      "max_iterations": 500,
+      "convergence_tolerance": 1e-6,
+      "pressure_lower_bound_factor": 0.01,
+      "use_cavitation_patch": true
+    },
+    "temperature_field": {
+      "grid_size_theta": 32,
+      "grid_size_z": 16,
+      "time_step": 0.01,
+      "diffusion_coefficient": 1.45e-7,
+      "inlet_temperature_default": 293.15,
+      "wall_temperature_gradient_factor": 0.7
+    }
+  },
+  "friction": {
+    "coulomb_friction_dry": 0.3,
+    "mixed_lubrication_weight": 0.2,
+    "cavitation_rpm_threshold": 50.0,
+    "rated_load_n": 1500.0,
+    "rated_rpm": 50.0,
+    "rated_power_w": 50.0,
+    "warning_power_factor": 0.8,
+    "overload_power_factor": 1.2,
+    "temperature_rise_warning_k": 15.0,
+    "temperature_rise_overload_k": 30.0,
+    "iterative_convergence_power_tol": 0.01,
+    "iterative_convergence_temp_tol_k": 0.1,
+    "max_iterations_temp_coupling": 20
+  },
+  "alerts": {
+    "film_rupture_risk_threshold": 0.7,
+    "cavitation_severe_area_fraction": 0.2,
+    "history_max_length": 100,
+    "frontend_display_max": 50,
+    "banner_auto_dismiss_ms": 8000
+  },
+  "known_bearings": [
+    {"id": "bearing-south-01", "name": "南门筒车-1号轴承", "location": "开封府-南水门"},
+    {"id": "bearing-north-02", "name": "北门筒车-2号轴承", "location": "开封府-北水门"},
+    {"id": "bearing-east-03",  "name": "东门筒车-3号轴承", "location": "开封府-东水门"}
+  ]
+}

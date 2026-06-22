@@ -1,21 +1,27 @@
 from .bearing import (
     BearingData,
-    BearingDataResponse,
-    AlertMessage,
+    BearingDataReceived,
+    BearingInfo,
     SimulationRequest,
     SimulationResponse,
-    BearingListResponse,
     HistoryQuery,
+    Alert,
+    BearingDataResponse,
+    AlertMessage,
+    BearingListResponse,
     StatsResponse,
 )
 
 __all__ = [
     'BearingData',
-    'BearingDataResponse',
-    'AlertMessage',
+    'BearingDataReceived',
+    'BearingInfo',
     'SimulationRequest',
     'SimulationResponse',
-    'BearingListResponse',
     'HistoryQuery',
+    'Alert',
+    'BearingDataResponse',
+    'AlertMessage',
+    'BearingListResponse',
     'StatsResponse',
 ]

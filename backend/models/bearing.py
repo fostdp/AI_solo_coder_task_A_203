@@ -1,32 +1,102 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+"""v3.0 数据模型 — 覆盖DTU接收、仿真请求/响应、告警、轴承元数据、历史查询。"""
 from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
 
 
+# ============== DTU 数据接收 ==============
 class BearingData(BaseModel):
+    bearing_id: Optional[str] = Field(None, description="轴承ID（路由参数优先）")
     rpm: float = Field(..., description="转速 (RPM)")
-    water_pressure: float = Field(..., description="平均水膜压力 (Pa)")
-    max_pressure: Optional[float] = Field(None, description="最大水膜压力 (Pa)")
+    water_pressure: float = Field(..., description="平均水膜压力 (kPa)")
     friction_coefficient: float = Field(..., description="摩擦系数")
     water_temperature: float = Field(..., description="水温 (°C)")
+    power_loss_watts: Optional[float] = Field(None, description="摩擦功耗 (W)")
+    flow_rate_m3s: Optional[float] = Field(None, description="流量 (m³/s)")
     eccentricity_ratio: Optional[float] = Field(None, description="偏心率")
-    min_film_thickness: Optional[float] = Field(None, description="最小水膜厚度 (m)")
-    load_capacity: Optional[float] = Field(None, description="承载能力 (N)")
-    friction_torque: Optional[float] = Field(None, description="摩擦力矩 (N·m)")
-    power_loss: Optional[float] = Field(None, description="摩擦功耗 (W)")
-    sommerfeld_number: Optional[float] = Field(None, description="Sommerfeld数")
-    temperature_rise: Optional[float] = Field(None, description="温升 (K)")
-    flow_rate: Optional[float] = Field(None, description="流量 (m³/s)")
-    cavitation_area_fraction: Optional[float] = Field(None, description="空化面积比")
-    cavitation_max_vapor_fraction: Optional[float] = Field(None, description="最大蒸汽体积分数")
-    has_cavitation: Optional[bool] = Field(None, description="是否发生空化")
-    rupture_risk: Optional[float] = Field(None, description="水膜破裂风险")
-    film_status: Optional[str] = Field(None, description="水膜状态: normal/warning/ruptured")
-    power_status: Optional[str] = Field(None, description="功耗状态: normal/warning/overload")
-    attitude_angle: Optional[float] = Field(None, description="偏位角 (rad)")
-    timestamp: Optional[str] = Field(None, description="时间戳")
+    load_capacity_n: Optional[float] = Field(None, description="承载能力 (N)")
+    max_pressure_pa: Optional[float] = Field(None, description="最大水膜压力 (Pa)")
+    min_film_thickness_micron: Optional[float] = Field(None, description="最小水膜厚度 (μm)")
+    avg_velocity_mps: Optional[float] = Field(None, description="平均流速 (m/s)")
+    cavitation_area_fraction: Optional[float] = Field(None, description="空化面积比 (0-1)")
+    vapor_fraction_max: Optional[float] = Field(None, description="最大蒸汽体积分数")
+    film_status: Optional[str] = Field(None, description="水膜状态 normal/warning/ruptured")
+    power_status: Optional[str] = Field(None, description="功耗状态 normal/warning/overload")
+    location: Optional[str] = Field(None, description="位置/站点")
+    timestamp: Optional[datetime] = Field(None, description="时间戳")
 
 
+class BearingDataReceived(BaseModel):
+    bearing_id: str
+    timestamp: datetime
+    status: str = "accepted"
+    message: str = ""
+
+
+# ============== 轴承元数据 ==============
+class BearingInfo(BaseModel):
+    id: str
+    name: str = ""
+    location: str = ""
+    description: str = ""
+
+
+# ============== 仿真计算 ==============
+class SimulationRequest(BaseModel):
+    bearing_id: Optional[str] = Field(None, description="轴承ID")
+    rpm: float = Field(35.0, description="转速 (RPM)")
+    eccentricity_ratio: float = Field(0.3, description="偏心率")
+    load_n: Optional[float] = Field(None, description="载荷 (N)；None则用雷诺方程求解的承载力")
+    temperature: Optional[float] = Field(None, description="温度 (K)；None则用参考温度")
+    viscosity_model: Optional[str] = Field("andrade", description="andrade/reynolds/walther/vogel/polynomial")
+
+
+class SimulationResponse(BaseModel):
+    bearing_id: Optional[str] = None
+    rpm: float
+    load_capacity: float
+    attitude_angle_rad: float
+    pressure_distribution: List[float]
+    film_thickness: List[float]
+    max_pressure_pa: float
+    min_film_thickness_m: float
+    friction_coefficient: float
+    friction_torque_nm: float
+    power_loss_watts: float
+    flow_rate_m3s: float
+    cavitation_area_fraction: float
+    vapor_fraction_max: float
+    temperature_inlet_k: float
+    temperature_outlet_k: float
+    film_rupture_risk: float
+    film_status: str
+    power_status: str
+    alerts_generated: int = 0
+    solver_converged: bool = False
+    solver_iterations: int = 0
+
+
+# ============== 历史查询 ==============
+class HistoryQuery(BaseModel):
+    bearing_id: Optional[str] = None
+    start_time: str = "-24h"
+    end_time: str = "now()"
+    limit: int = 1000
+    fields: Optional[List[str]] = None
+
+
+# ============== 告警 ==============
+class Alert(BaseModel):
+    bearing_id: str
+    type: str
+    severity: str
+    message: str
+    value: Optional[Any] = None
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ============== 废弃兼容（保留） ==============
 class BearingDataResponse(BaseModel):
     bearing_id: str
     data: BearingData
@@ -42,54 +112,18 @@ class AlertMessage(BaseModel):
     timestamp: datetime
 
 
-class SimulationRequest(BaseModel):
-    rpm: float = Field(35.0, description="转速 (RPM)")
-    eccentricity_ratio: float = Field(0.3, description="偏心率")
-    water_temperature: float = Field(22.0, description="水温 (°C)")
-    bearing_radius: float = Field(0.05, description="轴承半径 (m)")
-    bearing_length: float = Field(0.08, description="轴承长度 (m)")
-    radial_clearance: float = Field(2e-4, description="径向间隙 (m)")
-    load: float = Field(800.0, description="载荷 (N)")
-
-
-class SimulationResponse(BaseModel):
-    pressure_distribution: List[float]
-    film_thickness: List[float]
-    theta: List[float]
-    max_pressure: float
-    min_pressure: float
-    load_capacity: float
-    attitude_angle: float
-    friction_coefficient: float
-    power_loss: float
-    friction_torque: float
-    cavitation_area_fraction: float
-    has_cavitation: bool
-    rupture_risk: float
-    film_status: str
-    temperature_rise: float
-    velocity_profiles: Optional[Dict[str, List[float]]] = None
-
-
 class BearingListResponse(BaseModel):
     bearings: List[str]
 
 
-class HistoryQuery(BaseModel):
-    bearing_id: str
-    start_time: str = "-1h"
-    end_time: str = "now()"
-    fields: Optional[List[str]] = None
-
-
 class StatsResponse(BaseModel):
     bearing_id: str
-    avg_rpm: float
-    avg_pressure: float
-    avg_friction_coeff: float
-    avg_temp: float
-    max_power_loss: float
-    avg_power_loss: float
-    avg_eccentricity: float
-    alert_count: int
-    data_points: int
+    avg_rpm: Optional[float] = None
+    avg_pressure: Optional[float] = None
+    avg_friction_coeff: Optional[float] = None
+    avg_temp: Optional[float] = None
+    max_power_loss: Optional[float] = None
+    avg_power_loss: Optional[float] = None
+    avg_eccentricity: Optional[float] = None
+    alert_count: int = 0
+    data_points: int = 0

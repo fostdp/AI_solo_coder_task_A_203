@@ -1,0 +1,56 @@
+{
+  "_comment": "宋代筒车水润滑轴承 - 流体参数配置 (JSON, C风格/* */注释在加载时剥离)",
+  "fluid": {
+    "type": "water",
+    "density": 1000.0,
+    "reference_temperature": 293.15,
+    "reference_viscosity": 1.002e-3,
+    "viscosity_model": "andrade",
+    "viscosity_models": {
+      "andrade": {"A": 1.856e-6, "B": 1948.0},
+      "reynolds": {"mu0": 1.792e-3, "beta": 0.025, "T0": 273.15},
+      "walther": {"A": 10.2, "B": 1.25},
+      "vogel": {"mu0": 1.002e-3, "B": 578.0, "T_inf": 138.0},
+      "polynomial": {
+        "coeffs": [1.7914e-3, -4.8505e-5, 6.7108e-7, -5.4499e-9,
+                   2.7367e-11, -8.6692e-14, 1.6823e-16, -1.9318e-19,
+                   1.2536e-22, -3.5581e-26],
+        "T0": 273.15
+      }
+    },
+    "specific_heat": 4186.0,
+    "thermal_conductivity": 0.606,
+    "thermal_expansion": 2.1e-4,
+    "prandtl_number_reference": 7.01,
+    "vapor_pressure_atm": 0.0231,
+    "vapor_pressure": 2338.8,
+    "surface_tension": 0.0728,
+    "ambient_pressure": 101325.0,
+    "bulk_modulus": 2.2e9
+  },
+  "cavitation": {
+    "model": "rayleigh_plesset",
+    "nucleation_site_density": 1e12,
+    "initial_bubble_radius": 1e-6,
+    "polytropic_index": 1.4,
+    "rp_integration_steps": 20,
+    "rp_integration_dt": 1e-4,
+    "bubble_radius_limit_factor": 0.45,
+    "max_bubble_radius": 1e-2,
+    "severe_cavitation_threshold": 0.2,
+    "dynamic_cavitation_min_omega": 0.1
+  },
+  "sph": {
+    "particle_count": 600,
+    "kernel_h": 10,
+    "rest_density": 1000,
+    "gamma": 1.5,
+    "viscosity_mu": 0.5,
+    "dt": 0.016,
+    "damping": 0.998,
+    "boundary_penalty_k": 8000,
+    "reflection_coefficient": 0.2,
+    "couette_drag": 2.0,
+    "particle_mass": 1.0
+  }
+}

@@ -1,496 +1,292 @@
 """
-古代筒车轴承水润滑流场仿真与摩擦功耗分析系统 - FastAPI 后端
+古代筒车轴承水润滑流场仿真与摩擦功耗分析系统 - FastAPI编排层
+职责: 对外暴露REST+WebSocket API，内部通过消息总线协调DTU/Flow/Friction/Alarm四服务。
 """
-import os
-import sys
-import json
 import asyncio
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Set
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, status
+import logging
+import os
+import uuid
+from datetime import datetime, timezone
+from typing import List, Optional
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
 
-sys.path.insert(0, os.path.dirname(__file__))
-
-from database.influxdb_client import InfluxDBClientWrapper
-from simulation import WaterFilmSolver, CavitationModel, FrictionAnalyzer
-from models.bearing import (
+from .config import get_bearing_config, get_nested, reload_all
+from .database import InfluxDBClientWrapper
+from .messaging import MessageBus
+from .models.bearing import (
+    Alert,
     BearingData,
-    BearingDataResponse,
-    AlertMessage,
+    BearingDataReceived,
+    BearingInfo,
+    HistoryQuery,
     SimulationRequest,
     SimulationResponse,
-    BearingListResponse,
-    StatsResponse,
 )
+from .services import (
+    AlarmWebSocketService,
+    DTUReceiver,
+    FlowSimulator,
+    FrictionAnalyzerService,
+)
+
+logging.basicConfig(
+    level=os.getenv('LOG_LEVEL', 'INFO'),
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+)
+log = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="古代筒车轴承水润滑流场仿真与摩擦功耗分析系统",
-    description="基于Navier-Stokes方程和空化模型的水润滑轴承仿真分析平台",
-    version="1.0.0",
+    title='Ancient Water Wheel Bearing Water Lubrication Simulation',
+    description='宋代筒车水润滑轴承流场仿真与摩擦功耗分析系统 v3.0',
+    version='3.0.0',
 )
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=['*'],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=['*'],
+    allow_headers=['*'],
 )
 
-db_client = InfluxDBClientWrapper()
+# ---------- 依赖初始化 ----------
+bus = MessageBus.instance()
+db = InfluxDBClientWrapper()
+dtu = DTUReceiver(bus=bus, db=db)
+flow_sim = FlowSimulator(bus=bus)
+friction_svc = FrictionAnalyzerService(bus=bus)
+alarm_svc = AlarmWebSocketService(bus=bus)
 
-active_connections: Set[WebSocket] = set()
+KNOWN_BEARINGS_CFG = get_nested(get_bearing_config(), 'known_bearings', [])
+KNOWN_BEARINGS = {b['id']: b for b in KNOWN_BEARINGS_CFG}
 
-alert_history: List[Dict] = []
-
-bearing_cache: Dict[str, Dict] = {}
-
-KNOWN_BEARINGS = ["bearing_001", "bearing_002", "bearing_003"]
-
-
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-
-    async def broadcast(self, message: dict):
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(message)
-            except Exception:
-                pass
+FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'frontend')
+if os.path.isdir(FRONTEND_DIR):
+    app.mount('/static', StaticFiles(directory=FRONTEND_DIR), name='static')
 
 
-manager = ConnectionManager()
-
-
-def check_alerts(bearing_id: str, data: dict) -> List[dict]:
-    alerts = []
-    now = datetime.utcnow()
-
-    film_status = data.get('film_status', 'normal')
-    rupture_risk = data.get('rupture_risk', 0.0)
-
-    if film_status == 'ruptured':
-        alerts.append({
-            'alert_type': 'film_rupture',
-            'bearing_id': bearing_id,
-            'severity': 'critical',
-            'message': f'水膜破裂警报！轴承 {bearing_id} 水膜已破裂，破裂风险: {rupture_risk:.2f}',
-            'data': {
-                'rupture_risk': rupture_risk,
-                'min_film_thickness': data.get('min_film_thickness'),
-                'eccentricity_ratio': data.get('eccentricity_ratio'),
-                'cavitation_area_fraction': data.get('cavitation_area_fraction'),
-            },
-            'timestamp': now.isoformat() + "Z",
-        })
-    elif film_status == 'warning':
-        alerts.append({
-            'alert_type': 'film_warning',
-            'bearing_id': bearing_id,
-            'severity': 'warning',
-            'message': f'水膜警告！轴承 {bearing_id} 水膜状态异常，破裂风险: {rupture_risk:.2f}',
-            'data': {
-                'rupture_risk': rupture_risk,
-                'min_film_thickness': data.get('min_film_thickness'),
-                'eccentricity_ratio': data.get('eccentricity_ratio'),
-            },
-            'timestamp': now.isoformat() + "Z",
-        })
-
-    power_status = data.get('power_status', 'normal')
-    power_loss = data.get('power_loss', 0.0)
-
-    if power_status == 'overload':
-        alerts.append({
-            'alert_type': 'power_overload',
-            'bearing_id': bearing_id,
-            'severity': 'critical',
-            'message': f'功耗过载警报！轴承 {bearing_id} 摩擦功耗过高: {power_loss:.2f} W',
-            'data': {
-                'power_loss': power_loss,
-                'friction_coefficient': data.get('friction_coefficient'),
-                'rpm': data.get('rpm'),
-            },
-            'timestamp': now.isoformat() + "Z",
-        })
-    elif power_status == 'warning':
-        alerts.append({
-            'alert_type': 'power_warning',
-            'bearing_id': bearing_id,
-            'severity': 'warning',
-            'message': f'功耗警告！轴承 {bearing_id} 摩擦功耗偏高: {power_loss:.2f} W',
-            'data': {
-                'power_loss': power_loss,
-                'friction_coefficient': data.get('friction_coefficient'),
-                'rpm': data.get('rpm'),
-            },
-            'timestamp': now.isoformat() + "Z",
-        })
-
-    if data.get('has_cavitation', False):
-        cav_fraction = data.get('cavitation_area_fraction', 0)
-        if cav_fraction > 0.2:
-            alerts.append({
-                'alert_type': 'cavitation_severe',
-                'bearing_id': bearing_id,
-                'severity': 'warning',
-                'message': f'严重空化！轴承 {bearing_id} 空化面积比: {cav_fraction * 100:.1f}%',
-                'data': {
-                    'cavitation_area_fraction': cav_fraction,
-                    'max_vapor_fraction': data.get('cavitation_max_vapor_fraction'),
-                },
-                'timestamp': now.isoformat() + "Z",
-            })
-
-    return alerts
-
-
-@app.get("/")
+# ---------- 首页 ----------
+@app.get('/', response_class=HTMLResponse, tags=['UI'])
 async def root():
+    index_path = os.path.join(FRONTEND_DIR, 'index.html')
+    if os.path.isfile(index_path):
+        with open(index_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    return HTMLResponse('<h1>轴承水润滑仿真系统 v3.0</h1><p>前端文件未部署。</p>')
+
+
+@app.get('/api/health', tags=['System'])
+async def health():
     return {
-        "name": "古代筒车轴承水润滑流场仿真与摩擦功耗分析系统",
-        "version": "1.0.0",
-        "status": "running",
-        "endpoints": {
-            "sensor_data": "/api/bearing/{bearing_id}/data",
-            "latest_data": "/api/bearing/{bearing_id}/latest",
-            "history": "/api/bearing/{bearing_id}/history",
-            "simulation": "/api/simulation/calculate",
-            "alerts": "/api/alerts",
-            "websocket": "/ws",
-        }
+        'status': 'ok',
+        'version': '3.0.0',
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'message_bus': bus.mode,
+        'influxdb': db.client is not None,
+        'connections_ws': alarm_svc.manager.connection_count,
     }
 
 
-@app.get("/api/bearings", response_model=BearingListResponse)
+@app.post('/api/config/reload', tags=['System'])
+async def reload_config():
+    reload_all()
+    return {'status': 'reloaded'}
+
+
+# ---------- 轴承元数据 ----------
+@app.get('/api/bearings', response_model=List[BearingInfo], tags=['Bearing'])
 async def list_bearings():
-    bearings = list(set(KNOWN_BEARINGS + list(bearing_cache.keys())))
-    return {"bearings": bearings}
+    out = []
+    known = {b['id']: b for b in KNOWN_BEARINGS_CFG}
+    for bid in dtu.list_recent_ids():
+        known.setdefault(bid, {'id': bid, 'name': bid, 'location': 'unknown'})
+    for bid, info in known.items():
+        out.append(BearingInfo(
+            id=info['id'],
+            name=info.get('name', info['id']),
+            location=info.get('location', ''),
+            description=info.get('description', ''),
+        ))
+    return out
 
 
-@app.post("/api/bearing/{bearing_id}/data", response_model=BearingDataResponse)
+# ---------- 数据接收 (DTU) ----------
+@app.post('/api/bearing/{bearing_id}/data', response_model=BearingDataReceived, tags=['DTU'])
 async def receive_bearing_data(bearing_id: str, data: BearingData):
-    data_dict = data.dict()
-    timestamp = datetime.utcnow()
-
-    bearing_cache[bearing_id] = {
-        **data_dict,
-        "received_at": timestamp.isoformat() + "Z",
-    }
-
-    fields = {k: v for k, v in data_dict.items()
-              if isinstance(v, (int, float)) and v is not None}
-
     try:
-        db_client.write_bearing_data(bearing_id, fields, timestamp)
-    except Exception as e:
-        print(f"Warning: Failed to write to InfluxDB: {e}")
-
-    alerts = check_alerts(bearing_id, data_dict)
-    for alert in alerts:
-        alert_history.append(alert)
-        if len(alert_history) > 100:
-            alert_history.pop(0)
-        asyncio.create_task(manager.broadcast({
-            "type": "alert",
-            "data": alert,
-        }))
-
-    asyncio.create_task(manager.broadcast({
-        "type": "bearing_data",
-        "data": {
-            "bearing_id": bearing_id,
-            **data_dict,
-            "received_at": timestamp.isoformat() + "Z",
-        },
-    }))
-
-    return {
-        "bearing_id": bearing_id,
-        "data": data,
-        "received_at": timestamp,
-    }
+        payload = data.model_dump()
+        payload.pop('bearing_id', None)
+        return dtu.receive(bearing_id, payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get("/api/bearing/{bearing_id}/latest")
+@app.get('/api/bearing/{bearing_id}/latest', tags=['DTU'])
 async def get_latest_data(bearing_id: str):
-    if bearing_id in bearing_cache:
-        return {
-            "bearing_id": bearing_id,
-            "data": bearing_cache[bearing_id],
-            "source": "cache",
+    cached = dtu.get_latest(bearing_id)
+    if cached:
+        return cached
+    rows = db.query_bearing_data(bearing_id, limit=1)
+    if not rows:
+        raise HTTPException(status_code=404, detail=f'轴承 {bearing_id} 无数据')
+    point = rows[0]
+    return point
+
+
+@app.post('/api/bearing/{bearing_id}/history', tags=['DTU'])
+async def get_history(bearing_id: str, query: HistoryQuery):
+    try:
+        rows = db.query_bearing_data(
+            bearing_id,
+            start_time=query.start_time,
+            end_time=query.end_time,
+            limit=query.limit,
+            fields=query.fields,
+        )
+    except Exception as e:
+        log.exception('历史查询失败: %s', e)
+        raise HTTPException(status_code=500, detail=str(e))
+    return {'bearing_id': bearing_id, 'count': len(rows), 'data': rows}
+
+
+@app.get('/api/bearing/{bearing_id}/stats', tags=['DTU'])
+async def get_stats(bearing_id: str, hours: int = 24):
+    rows = db.query_bearing_data(bearing_id, limit=10000)
+    if not rows:
+        raise HTTPException(status_code=404, detail=f'轴承 {bearing_id} 无数据')
+    fields = ['rpm', 'water_pressure', 'friction_coefficient',
+              'water_temperature', 'power_loss_watts']
+    stats = {'bearing_id': bearing_id, 'hours': hours, 'count': len(rows)}
+    for f in fields:
+        vals = [r.get(f) for r in rows if isinstance(r.get(f), (int, float))]
+        if not vals:
+            continue
+        stats[f] = {
+            'min': min(vals), 'max': max(vals),
+            'avg': sum(vals) / len(vals), 'last': vals[-1],
         }
-
-    db_data = db_client.get_latest_data(bearing_id)
-    if db_data:
-        return {
-            "bearing_id": bearing_id,
-            "data": db_data,
-            "source": "influxdb",
-        }
-
-    raise HTTPException(status_code=404, detail=f"No data found for bearing {bearing_id}")
+    return stats
 
 
-@app.get("/api/bearing/{bearing_id}/history")
-async def get_history_data(
-    bearing_id: str,
-    start_time: str = "-1h",
-    end_time: str = "now()",
-):
-    records = db_client.query_bearing_data(
-        bearing_id=bearing_id,
-        start_time=start_time,
-        end_time=end_time,
-    )
-
-    time_series = {}
-    for record in records:
-        t = record["time"].isoformat() if hasattr(record["time"], "isoformat") else str(record["time"])
-        field = record["field"]
-        value = record["value"]
-
-        if t not in time_series:
-            time_series[t] = {}
-        time_series[t][field] = value
-
-    result = [
-        {"time": t, **values}
-        for t, values in sorted(time_series.items())
-    ]
-
-    return {
-        "bearing_id": bearing_id,
-        "start_time": start_time,
-        "end_time": end_time,
-        "data_points": len(result),
-        "data": result,
-    }
-
-
-@app.get("/api/bearing/{bearing_id}/stats", response_model=StatsResponse)
-async def get_bearing_stats(bearing_id: str, start_time: str = "-24h"):
-    records = db_client.query_bearing_data(
-        bearing_id=bearing_id,
-        start_time=start_time,
-    )
-
-    if not records:
-        raise HTTPException(status_code=404, detail=f"No data found for bearing {bearing_id}")
-
-    field_values = {}
-    for record in records:
-        field = record["field"]
-        value = record["value"]
-        if field not in field_values:
-            field_values[field] = []
-        field_values[field].append(value)
-
-    rpm_values = field_values.get("rpm", [0])
-    pressure_values = field_values.get("water_pressure", [0])
-    friction_values = field_values.get("friction_coefficient", [0])
-    temp_values = field_values.get("water_temperature", [0])
-    power_values = field_values.get("power_loss", [0])
-    eccentricity_values = field_values.get("eccentricity_ratio", [0])
-
-    alert_count = sum(1 for a in alert_history if a["bearing_id"] == bearing_id)
-
-    return StatsResponse(
-        bearing_id=bearing_id,
-        avg_rpm=sum(rpm_values) / len(rpm_values) if rpm_values else 0,
-        avg_pressure=sum(pressure_values) / len(pressure_values) if pressure_values else 0,
-        avg_friction_coeff=sum(friction_values) / len(friction_values) if friction_values else 0,
-        avg_temp=sum(temp_values) / len(temp_values) if temp_values else 0,
-        max_power_loss=max(power_values) if power_values else 0,
-        avg_power_loss=sum(power_values) / len(power_values) if power_values else 0,
-        avg_eccentricity=sum(eccentricity_values) / len(eccentricity_values) if eccentricity_values else 0,
-        alert_count=alert_count,
-        data_points=len(records),
-    )
-
-
-@app.post("/api/simulation/calculate", response_model=SimulationResponse)
-async def run_simulation(req: SimulationRequest):
-    temp_k = req.water_temperature + 273.15
-    mu_0 = 1.792e-3
-    T0 = 273.15
-    viscosity = mu_0 * (2.71828 ** (-1.8 * (temp_k - T0) / T0))
-
-    solver = WaterFilmSolver(
-        bearing_radius=req.bearing_radius,
-        bearing_length=req.bearing_length,
-        radial_clearance=req.radial_clearance,
-        eccentricity=req.eccentricity_ratio * req.radial_clearance,
-        viscosity=viscosity,
-    )
-
-    cavitation = CavitationModel(temperature=temp_k)
-    friction = FrictionAnalyzer(
-        bearing_radius=req.bearing_radius,
-        bearing_length=req.bearing_length,
-        radial_clearance=req.radial_clearance,
-        viscosity=viscosity,
-    )
-
-    omega = req.rpm * 2 * 3.141592653589793 / 60
-
-    solver.calculate_film_thickness(req.eccentricity_ratio * req.radial_clearance)
-    pressure_result = solver.solve_pressure(omega)
-    pressure = pressure_result['pressure']
-    film_thickness = pressure_result['film_thickness']
-
-    cav_result = cavitation.detect_cavitation(pressure, film_thickness, omega)
-    rupture_result = cavitation.assess_film_rupture(pressure, film_thickness, omega)
-
-    actual_load = min(req.load, pressure_result['load_capacity'] * 0.8)
-    friction_result = friction.full_analysis(
-        omega=omega,
-        load=actual_load,
+# ---------- 仿真计算 (Flow + Friction) ----------
+@app.post('/api/simulation/calculate', response_model=SimulationResponse, tags=['Simulation'])
+async def calculate_simulation(req: SimulationRequest):
+    # 1. 直接调用流场仿真（非消息驱动，以降低延迟）
+    flow = flow_sim.compute(
+        rpm=req.rpm,
         eccentricity_ratio=req.eccentricity_ratio,
-        pressure_field=pressure,
-        film_thickness=film_thickness,
-        inlet_temp=temp_k,
+        temperature=req.temperature,
+        viscosity_model=req.viscosity_model,
     )
+    flow['bearing_id'] = req.bearing_id
 
-    mid_z_idx = solver.n_z // 2
-    pressure_1d = pressure[:, mid_z_idx].tolist()
-    film_1d = film_thickness[:, mid_z_idx].tolist()
-    theta_list = solver.theta.tolist()
+    # 2. 摩擦功耗分析
+    friction = friction_svc.compute_from_flow(
+        flow,
+        load_n=req.load_n if req.load_n else None,
+        viscosity_model=req.viscosity_model,
+    )
+    friction['bearing_id'] = req.bearing_id
+
+    # 3. 告警评估
+    alerts = alarm_svc.evaluate(req.bearing_id or 'adhoc', flow, friction)
+    alarm_svc.push_alerts(alerts)
+
+    # 4. 发布到总线（供其他订阅者消费）
+    bus.publish('flow_result', flow)
+    bus.publish('friction_result', friction)
 
     return SimulationResponse(
-        pressure_distribution=pressure_1d,
-        film_thickness=film_1d,
-        theta=theta_list,
-        max_pressure=pressure_result['max_pressure'],
-        min_pressure=pressure_result['min_pressure'],
-        load_capacity=pressure_result['load_capacity'],
-        attitude_angle=pressure_result['attitude_angle'],
-        friction_coefficient=friction_result['friction_coefficient'],
-        power_loss=friction_result['power_loss'],
-        friction_torque=friction_result['friction_torque'],
-        cavitation_area_fraction=cav_result['cavitation_area_fraction'],
-        has_cavitation=cav_result['has_cavitation'],
-        rupture_risk=rupture_result['rupture_risk'],
-        film_status=rupture_result['status'],
-        temperature_rise=friction_result['temperature_rise'],
+        bearing_id=req.bearing_id,
+        rpm=req.rpm,
+        load_capacity=flow['load_capacity_n'],
+        attitude_angle_rad=flow['attitude_angle_rad'],
+        pressure_distribution=flow['pressure_distribution_pa'],
+        film_thickness=flow['film_thickness_m'],
+        max_pressure_pa=flow['max_pressure_pa'],
+        min_film_thickness_m=flow['min_film_thickness_m'],
+        friction_coefficient=friction['friction_coefficient'],
+        friction_torque_nm=friction['friction_torque_nm'],
+        power_loss_watts=friction['power_loss_watts'],
+        flow_rate_m3s=friction['flow_rate_m3s'],
+        cavitation_area_fraction=flow['cavitation_area_fraction'],
+        vapor_fraction_max=flow['max_vapor_fraction'],
+        temperature_inlet_k=friction['inlet_temperature_k'],
+        temperature_outlet_k=friction['outlet_temperature_k'],
+        film_rupture_risk=flow['film_rupture_risk'],
+        film_status=flow['film_status'],
+        power_status=friction['power_status'],
+        alerts_generated=len(alerts),
+        solver_converged=flow['solver_converged'],
+        solver_iterations=flow['solver_iterations'],
     )
 
 
-@app.get("/api/simulation/velocity")
-async def get_velocity_field(
-    rpm: float = 35.0,
-    eccentricity_ratio: float = 0.3,
-    water_temperature: float = 22.0,
-):
-    temp_k = water_temperature + 273.15
-    mu_0 = 1.792e-3
-    T0 = 273.15
-    viscosity = mu_0 * (2.71828 ** (-1.8 * (temp_k - T0) / T0))
-
-    solver = WaterFilmSolver(viscosity=viscosity, grid_size=32)
-    solver.calculate_film_thickness(eccentricity_ratio * solver.c)
-    omega = rpm * 2 * 3.141592653589793 / 60
-    solver.solve_pressure(omega)
-    velocity = solver.calculate_velocity_field(omega)
-
-    mid_z_idx = solver.n_z // 2
-    u_mid = velocity['u'][:, mid_z_idx, :]
-    v_mid = velocity['v'][:, mid_z_idx, :]
-
-    return {
-        "theta": solver.theta.tolist(),
-        "y_normalized": velocity['y_normalized'].tolist(),
-        "u_velocity": u_mid.tolist(),
-        "v_velocity": v_mid.tolist(),
-        "rpm": rpm,
-        "eccentricity_ratio": eccentricity_ratio,
-    }
+@app.get('/api/simulation/{bearing_id}/last', tags=['Simulation'])
+async def get_last_simulation(bearing_id: str):
+    flow = flow_sim.get_last_result(bearing_id)
+    friction = friction_svc.get_last_result(bearing_id)
+    if not flow and not friction:
+        raise HTTPException(status_code=404, detail=f'轴承 {bearing_id} 无仿真记录')
+    return {'flow': flow, 'friction': friction}
 
 
-@app.get("/api/alerts")
-async def get_alerts(limit: int = 50, bearing_id: Optional[str] = None):
-    alerts = alert_history[-limit:]
-    if bearing_id:
-        alerts = [a for a in alerts if a["bearing_id"] == bearing_id]
-    return {
-        "count": len(alerts),
-        "alerts": list(reversed(alerts)),
-    }
+# ---------- 告警 ----------
+@app.get('/api/alerts', response_model=List[Alert], tags=['Alert'])
+async def list_alerts(bearing_id: Optional[str] = None, limit: int = 50):
+    raw = alarm_svc.get_history(limit=limit, bearing_id=bearing_id)
+    out = []
+    for r in raw:
+        try:
+            out.append(Alert(**r))
+        except Exception:
+            out.append(Alert(
+                bearing_id=r.get('bearing_id', ''),
+                type=r.get('type', 'unknown'),
+                severity=r.get('severity', 'info'),
+                message=r.get('message', ''),
+                value=r.get('value'),
+                timestamp=r.get('timestamp') or datetime.now(timezone.utc),
+            ))
+    return out
 
 
-@app.websocket("/ws")
+# ---------- WebSocket ----------
+@app.websocket('/ws')
 async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+    client_id = str(uuid.uuid4())
+    await alarm_svc.manager.connect(websocket, client_id)
     try:
         await websocket.send_json({
-            "type": "connected",
-            "message": "WebSocket 连接已建立",
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            'type': 'welcome', 'client_id': client_id,
+            'server_time': datetime.now(timezone.utc).isoformat(),
         })
-
-        for bearing_id in bearing_cache:
-            await websocket.send_json({
-                "type": "bearing_data",
-                "data": {
-                    "bearing_id": bearing_id,
-                    **bearing_cache[bearing_id],
-                },
-            })
+        for bid in dtu.list_recent_ids():
+            cached = dtu.get_latest(bid)
+            if cached:
+                await websocket.send_json({'type': 'bearing_data', 'data': cached})
+        for a in alarm_svc.get_history(limit=10):
+            await websocket.send_json({'type': 'alert', 'data': a})
 
         while True:
-            data = await websocket.receive_text()
             try:
-                msg = json.loads(data)
-                if msg.get("type") == "ping":
-                    await websocket.send_json({"type": "pong", "timestamp": datetime.utcnow().isoformat() + "Z"})
-            except json.JSONDecodeError:
-                pass
-
+                data = await asyncio.wait_for(websocket.receive_json(), timeout=30)
+                if data.get('type') == 'ping':
+                    await websocket.send_json({'type': 'pong', 'ts': datetime.now(timezone.utc).isoformat()})
+            except asyncio.TimeoutError:
+                await websocket.send_json({'type': 'ping', 'ts': datetime.now(timezone.utc).isoformat()})
+            except WebSocketDisconnect:
+                break
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
-    except Exception as e:
-        print(f"WebSocket error: {e}")
-        manager.disconnect(websocket)
+        pass
+    finally:
+        alarm_svc.manager.disconnect(client_id)
 
 
-@app.get("/api/health")
-async def health_check():
-    influx_status = db_client.test_connection()
-    return {
-        "status": "healthy",
-        "influxdb_connected": influx_status,
-        "websocket_connections": len(manager.active_connections),
-        "cached_bearings": len(bearing_cache),
-        "alert_count": len(alert_history),
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-    }
-
-
-frontend_dir = os.path.join(os.path.dirname(__file__), '..', 'frontend')
-if os.path.exists(frontend_dir):
-    app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
-
-    @app.get("/app")
-    async def serve_frontend():
-        index_path = os.path.join(frontend_dir, "index.html")
-        if os.path.exists(index_path):
-            return FileResponse(index_path)
-        raise HTTPException(status_code=404, detail="Frontend not found")
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.on_event('shutdown')
+async def _on_shutdown():
+    bus.close()
+    db.close()
