@@ -11,6 +11,7 @@ from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -51,6 +52,8 @@ app.add_middleware(
     allow_methods=['*'],
     allow_headers=['*'],
 )
+# 前端静态资源 Gzip 压缩（阈值 512 字节，压缩级别 6）
+app.add_middleware(GZipMiddleware, minimum_size=512, compresslevel=6)
 
 # ---------- 依赖初始化 ----------
 bus = MessageBus.instance()

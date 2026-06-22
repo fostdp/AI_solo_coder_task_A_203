@@ -1,0 +1,160 @@
+services:
+
+  # ============================================================
+  #  Redis — 消息总线 / 缓存
+  # ============================================================
+  redis:
+    image: redis:7.2-alpine
+    container_name: water-bearing-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - bearing-net
+
+  # ============================================================
+  #  InfluxDB v2 — 时序数据库
+  # ============================================================
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: water-bearing-influxdb
+    restart: unless-stopped
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_PASSWORD:-Admin123!}
+      DOCKER_INFLUXDB_INIT_ORG: water-bearing
+      DOCKER_INFLUXDB_INIT_BUCKET: bearing_sensor
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_TOKEN:-s3cr3t-t0k3n-f0r-b34r1ng}
+      DOCKER_INFLUXDB_INIT_RETENTION: 7d
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+      - ./docker/influxdb/init-downsampling.sh:/docker-entrypoint-initdb.d/init-downsampling.sh:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8086/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - bearing-net
+
+  # ============================================================
+  #  MQTT Broker (Eclipse Mosquitto) — DTU 上行链路
+  # ============================================================
+  mqtt:
+    image: eclipse-mosquitto:2.0.18-openssl
+    container_name: water-bearing-mqtt
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./docker/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt_data:/mosquitto/data
+      - mqtt_log:/mosquitto/log
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -W 3 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - bearing-net
+
+  # ============================================================
+  #  FastAPI — 编排层服务 (gunicorn + uvicorn workers)
+  # ============================================================
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: water-bearing-fastapi
+    restart: unless-stopped
+    environment:
+      SERVICE_ROLE: fastapi
+      PYTHONPATH: /app
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:-s3cr3t-t0k3n-f0r-b34r1ng}
+      INFLUXDB_ORG: water-bearing
+      INFLUXDB_BUCKET: bearing_sensor
+      MQTT_HOST: mqtt
+      MQTT_PORT: 1883
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-4}
+      GUNICORN_PORT: 8000
+    depends_on:
+      redis:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+      mqtt:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/config:/app/backend/config:ro
+      - ./frontend:/app/frontend:ro
+    networks:
+      - bearing-net
+
+  # ============================================================
+  #  Bearing Simulator — 水润滑轴承物理模拟器
+  # ============================================================
+  simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: water-bearing-simulator
+    restart: unless-stopped
+    environment:
+      SERVICE_ROLE: simulator
+      PYTHONPATH: /app
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      BEARING_ID: ${BEARING_ID:-bearing-south-01}
+      SIM_BASE_RPM: ${SIM_BASE_RPM:-30.0}
+      SIM_RPM_AMPLITUDE: ${SIM_RPM_AMPLITUDE:-8.0}
+      SIM_WATER_QUALITY: ${SIM_WATER_QUALITY:-clean}
+      SIM_BASE_TEMP_C: ${SIM_BASE_TEMP_C:-20.0}
+      SIM_INTERVAL_SEC: ${SIM_INTERVAL_SEC:-5.0}
+      SIM_LOAD_FACTOR: ${SIM_LOAD_FACTOR:-0.5}
+      SIM_INJECT_FAULT: ${SIM_INJECT_FAULT:-none}
+    depends_on:
+      redis:
+        condition: service_healthy
+      fastapi:
+        condition: service_healthy
+    volumes:
+      - ./backend/config:/app/backend/config:ro
+    networks:
+      - bearing-net
+
+# ============================================================
+#  共享卷 + 网络
+# ============================================================
+volumes:
+  redis_data:
+  influxdb_data:
+  influxdb_config:
+  mqtt_data:
+  mqtt_log:
+
+networks:
+  bearing-net:
+    driver: bridge

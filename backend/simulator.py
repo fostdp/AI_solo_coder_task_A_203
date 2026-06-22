@@ -38,13 +38,34 @@ log = logging.getLogger(__name__)
 class BearingSimulator:
     """
     生成物理合理的轴承传感器数据。
-    数据链路: 内部物理仿真 → 可选通过DTUReceiver验证+存储+总线发布
+    支持环境变量调参：
+      BEARING_ID / SIM_BASE_RPM / SIM_RPM_AMPLITUDE / SIM_BASE_TEMP_C
+      SIM_WATER_QUALITY (clean|sediment|salty|corrosive)
+      SIM_LOAD_FACTOR (0~2)
+      SIM_INJECT_FAULT (none|cavitation|wear|dry_run|overload)
     """
+
+    # 不同水质的粘度修正系数、表面张力修正、磨粒浓度
+    WATER_QUALITY_PROFILE: Dict[str, Dict[str, float]] = {
+        'clean':     {'mu_factor': 1.00, 'sigma_factor': 1.00, 'abrasion': 1.0e-7, 'contam': 0.00},
+        'sediment':  {'mu_factor': 1.15, 'sigma_factor': 0.95, 'abrasion': 5.0e-7, 'contam': 0.15},
+        'salty':     {'mu_factor': 1.08, 'sigma_factor': 0.88, 'abrasion': 1.5e-7, 'contam': 0.05},
+        'corrosive': {'mu_factor': 0.95, 'sigma_factor': 0.80, 'abrasion': 3.0e-6, 'contam': 0.25},
+    }
+
+    # 故障注入配置
+    FAULT_PROFILE: Dict[str, Dict[str, float]] = {
+        'none':       {'ecc_offset': 0.0,  'rpm_drop': 0.0,   'temp_bias': 0.0,  'mu_bias': 1.00,  'wear_mult': 1.0, 'load_mult': 1.0},
+        'cavitation': {'ecc_offset': 0.0,  'rpm_drop': 0.0,   'temp_bias': 5.0,  'mu_bias': 1.00,  'wear_mult': 1.5, 'load_mult': 1.0},
+        'wear':       {'ecc_offset': 0.15, 'rpm_drop': 0.0,   'temp_bias': 3.0,  'mu_bias': 1.00,  'wear_mult': 8.0, 'load_mult': 1.0},
+        'dry_run':    {'ecc_offset': 0.25, 'rpm_drop': 15.0,  'temp_bias': 20.0, 'mu_bias': 3.50,  'wear_mult': 30., 'load_mult': 1.0},
+        'overload':   {'ecc_offset': 0.05, 'rpm_drop': 5.0,   'temp_bias': 8.0,  'mu_bias': 1.00,  'wear_mult': 2.5, 'load_mult': 1.8},
+    }
 
     def __init__(self, bearing_id: str,
                  use_bus: bool = True,
                  rest_endpoint: Optional[str] = None):
-        self.bearing_id = bearing_id
+        self.bearing_id = bearing_id or os.getenv('BEARING_ID', 'bearing-south-01')
         self.cfg_bearing = get_bearing_config()
         self.cfg_fluid = get_fluid_config()
 
@@ -53,9 +74,31 @@ class BearingSimulator:
         self.L = float(default.get('length_m', 0.2))
         self.c = float(default.get('clearance_m', 0.0001))
         self.grid_size = int(get_nested(self.cfg_bearing, 'solver.reynolds_equation.grid_size', 32))
-        self.base_rpm = float(get_nested(self.cfg_bearing, 'friction.rated_rpm', 50.0) * 0.6)
-        self.base_load = float(get_nested(self.cfg_bearing, 'friction.rated_load_n', 1500.0) * 0.5)
-        self.base_supply_temp = float(self.cfg_fluid.get('reference_temperature', 293.15))
+
+        # ---- 环境变量可调参数 ----
+        rated_rpm = float(get_nested(self.cfg_bearing, 'friction.rated_rpm', 50.0))
+        rated_load = float(get_nested(self.cfg_bearing, 'friction.rated_load_n', 1500.0))
+        ref_temp_k = float(self.cfg_fluid.get('reference_temperature', 293.15))
+
+        self.base_rpm = float(os.getenv('SIM_BASE_RPM', rated_rpm * 0.6))
+        self.rpm_amplitude = float(os.getenv('SIM_RPM_AMPLITUDE', 8.0))
+        self.base_supply_temp_k = float(os.getenv('SIM_BASE_TEMP_C', ref_temp_k - 273.15)) + 273.15
+        self.load_factor = float(os.getenv('SIM_LOAD_FACTOR', 0.5))
+        self.base_load = rated_load * self.load_factor
+
+        water_q = os.getenv('SIM_WATER_QUALITY', 'clean').lower()
+        if water_q not in self.WATER_QUALITY_PROFILE:
+            log.warning('未知水质 %s，fallback 到 clean', water_q)
+            water_q = 'clean'
+        self.water_quality = water_q
+        self.wq_profile = self.WATER_QUALITY_PROFILE[water_q]
+
+        fault = os.getenv('SIM_INJECT_FAULT', 'none').lower()
+        if fault not in self.FAULT_PROFILE:
+            log.warning('未知故障 %s，fallback 到 none', fault)
+            fault = 'none'
+        self.inject_fault = fault
+        self.fault_profile = self.FAULT_PROFILE[fault]
 
         self.mu0 = float(self.cfg_fluid.get('reference_viscosity', 1.002e-3))
         self.viscosity_model_name = self.cfg_fluid.get('viscosity_model', 'andrade')
@@ -67,9 +110,10 @@ class BearingSimulator:
             bearing_length=self.L,
             radial_clearance=self.c,
         )
+        sigma = float(self.cfg_fluid.get('surface_tension', 0.0728)) * self.wq_profile['sigma_factor']
         self.cavitation = CavitationModel(
             vapor_pressure=float(self.cfg_fluid.get('vapor_pressure', 2338.8)),
-            surface_tension=float(self.cfg_fluid.get('surface_tension', 0.0728)),
+            surface_tension=sigma,
             density=float(self.cfg_fluid.get('density', 1000.0)),
         )
         self.friction = FrictionAnalyzer(
@@ -78,7 +122,7 @@ class BearingSimulator:
             radial_clearance=self.c,
             viscosity=self.mu0,
             viscosity_model=self.viscosity_model_name,
-            reference_temp=self.base_supply_temp,
+            reference_temp=self.base_supply_temp_k,
         )
 
         self.use_bus = use_bus
@@ -93,32 +137,44 @@ class BearingSimulator:
             self.bus = None
             self.dtu = None
 
+        log.info('模拟器参数: bearing=%s, rpm=%.1f±%.1f, T=%.1f°C, water=%s, fault=%s, load=%.1fx',
+                 self.bearing_id, self.base_rpm, self.rpm_amplitude,
+                 self.base_supply_temp_k - 273.15, self.water_quality,
+                 self.inject_fault, self.load_factor)
+
     def _update_temperature_dependent_properties(self, temperature_k: float) -> float:
         return self.viscosity_model.calculate_viscosity(temperature_k)
 
     def generate_reading(self) -> Dict[str, Any]:
-        """生成一小时的仿真读数。"""
+        """生成一小时的仿真读数，应用水质修正与故障注入。"""
         self.simulated_hours += 1
         t = self.simulated_hours
         time_frac = t / 24.0
+        fp = self.fault_profile
+        wq = self.wq_profile
 
-        rpm = (self.base_rpm + 8.0 * np.sin(2 * np.pi * time_frac)
+        rpm_base = self.base_rpm - fp['rpm_drop']
+        rpm = (rpm_base + self.rpm_amplitude * np.sin(2 * np.pi * time_frac)
                + np.random.normal(0, 2.0))
-        rpm = float(np.clip(rpm, 3.0, 120.0))
+        rpm = float(np.clip(rpm, 3.0, 200.0))
         omega = rpm * 2.0 * np.pi / 60.0
 
-        water_temp_k = (self.base_supply_temp + 5.0 * np.sin(2 * np.pi * time_frac - np.pi / 4)
+        water_temp_k = (self.base_supply_temp_k
+                        + fp['temp_bias']
+                        + 5.0 * np.sin(2 * np.pi * time_frac - np.pi / 4)
                         + np.random.normal(0, 0.3))
-        mu_eff = self._update_temperature_dependent_properties(water_temp_k)
+        mu_eff = self._update_temperature_dependent_properties(water_temp_k) * wq['mu_factor'] * fp['mu_bias']
 
-        wear_per_hour = 1e-7 * (rpm / self.base_rpm) ** 2
+        wear_per_hour = wq['abrasion'] * (rpm / max(self.base_rpm, 1e-3)) ** 2 * fp['wear_mult']
         self.total_wear += wear_per_hour + float(np.random.normal(0, 5e-8))
         self.total_wear = max(0.0, self.total_wear)
 
-        eccentricity_ratio = (0.25 + 10.0 * self.total_wear
+        eccentricity_ratio = (0.25
+                              + fp['ecc_offset']
+                              + 10.0 * self.total_wear
                               + 0.06 * np.sin(2 * np.pi * time_frac - np.pi / 6)
                               + np.random.normal(0, 0.012))
-        eccentricity_ratio = float(np.clip(eccentricity_ratio, 0.02, 0.85))
+        eccentricity_ratio = float(np.clip(eccentricity_ratio, 0.02, 0.95))
 
         self.water_solver.mu = mu_eff
         self.water_solver.calculate_film_thickness(eccentricity_ratio * self.c)
@@ -130,22 +186,19 @@ class BearingSimulator:
         rupture_result = self.cavitation.assess_film_rupture(p, h, omega)
         velocity = self.water_solver.calculate_velocity_field(omega)
 
-        load = self.base_load + np.random.normal(0, self.base_load * 0.06)
+        load = (self.base_load + np.random.normal(0, self.base_load * 0.06)) * fp['load_mult']
         full_analysis = self.friction.full_analysis(
             omega=omega, load=float(load),
             eccentricity_ratio=eccentricity_ratio,
             pressure_field=p, film_thickness=h,
-            temperature=water_temp_k, viscosity_model=self.viscosity_model_name,
+            inlet_temp=water_temp_k, viscosity_model=self.viscosity_model_name,
             iterate_temperature=True,
         )
 
         max_p = float(np.max(p))
         min_h = float(np.min(h))
         avg_u = float(np.mean(np.abs(velocity['u'])))
-        warning = self.friction.assess_power_warning(
-            full_analysis['power_loss_watts'],
-            full_analysis.get('temperature_rise', 0.0),
-        )
+        warning = full_analysis.get('warning', {}) or {}
 
         return {
             'rpm': float(rpm),
